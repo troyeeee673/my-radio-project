@@ -123,7 +123,7 @@ int mytbf_fetchtoken(mytbf_t* ptr, int size)//从ptr中取size个token
     struct mytbf_st * me = ptr;
     //加锁等待token满足
     pthread_mutex_lock(&me->mut);
-    while(me->token < 0)
+    while(me->token <= 0)
         pthread_cond_wait(&me->cond, &me->mut);
     int min_size = min(me->token, size);
     me->token -= min_size;
@@ -132,7 +132,7 @@ int mytbf_fetchtoken(mytbf_t* ptr, int size)//从ptr中取size个token
     return min_size;  
 }
 
-int mytbf_returntokne(mytbf_t*ptr, int size)//还token
+int mytbf_returntoken(mytbf_t*ptr, int size)//还token
 {
     struct mytbf_st * me = ptr;
     pthread_mutex_lock(&me->mut);

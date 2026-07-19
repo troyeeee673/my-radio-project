@@ -10,9 +10,6 @@
 #include <unistd.h>
 
 #include "thr_list.h"
-#include "server_conf.h"
-#include "medialib.h"
-#include <proto.h>
 
 static pthread_t tid_list;
 static int nr_list_ent;

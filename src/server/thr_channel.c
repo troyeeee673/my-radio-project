@@ -1,5 +1,4 @@
 //创建频道线程
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <syslog.h>
@@ -11,12 +10,7 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 
-
 #include "thr_channel.h"
-#include <proto.h>
-#include "server_conf.h"
-#include "medialib.h"
-
 
 struct thr_channel_ent_st
 {
@@ -26,11 +20,13 @@ struct thr_channel_ent_st
 
 struct thr_channel_ent_st thr_channel[CHNNM];
 static int tid_nextpos = 0;
+
 static void *thr_channel_snder(void * ptr)
 {
     int len;
     struct msg_channel_st *sndbufp;
     struct mlib_listentry_st *ent = ptr;
+    
     sndbufp = malloc(MSG_CHNNEL_MAX);
     if(sndbufp == NULL)
     {
@@ -42,21 +38,27 @@ static void *thr_channel_snder(void * ptr)
     while(1)
     {
         len = mlib_readchn(ent->chnid, sndbufp->data, MAX_DATA);
+        
+        if(len <= 0)
+        {
+            // 没有读到数据，等待一下再重试
+            syslog(LOG_WARNING, "thr_channel[%d]: mlib_readchn returned %d, sleeping...", ent->chnid, len);
+            sleep(1);  // 等待1秒，避免疯狂循环
+            continue;
+        }
 
         if(sendto(serversd, sndbufp, sizeof(chnid_t) + len, 0, (void *)&sndaddr, sizeof(sndaddr)) < 0)
         {
             syslog(LOG_ERR, "thr_channel [%d] sendto():%s", ent->chnid, strerror(errno));
-
         }
         else
         {
             syslog(LOG_DEBUG, "thr_channel(%d): sendto() succeed", ent->chnid);
         }
-        sched_yield();//主动出让调度器
+        sched_yield();
     }
     
     pthread_exit(NULL);
-
 }
 int thr_channel_create(struct mlib_listentry_st* ptr)
 {
@@ -85,14 +87,14 @@ int thr_channel_destroy(struct mlib_listentry_st* ptr)
                 syslog(LOG_ERR, "pthread_cancel() : %s", strerror(errno));
                 return -ESRCH;
             }
-            
+            pthread_join(thr_channel[i].tid, NULL);
+            thr_channel[i].chnid = -1;  // 标记为无效，避免destroyall时重复操作
+            return 0;        
         }
-        pthread_join(thr_channel[i].tid, NULL);
-        thr_channel[i].tid = -1;
-        return 0;        
     }
-    
+    return -1;  // 没找到对应的频道
 }
+
 int thr_channel_destroyall(void)
 {
     for(int i = 0 ;i < CHNNM ;i++)
@@ -105,9 +107,8 @@ int thr_channel_destroyall(void)
                 return -ESRCH;
             }
             pthread_join(thr_channel[i].tid, NULL);
-            thr_channel[i].tid = -1;
-           
+            thr_channel[i].chnid = -1;
         }
     }
-     return 0; 
+    return 0; 
 }

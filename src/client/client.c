@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -5,6 +6,7 @@
 #include <getopt.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <errno.h>
@@ -14,7 +16,7 @@
 
 
 #include "client.h"
-#include <proto.h>
+#include "../include/proto.h"
 
 /*
 *   -M  --mgroup  指定多播组
@@ -54,13 +56,15 @@ static ssize_t writen(int fd, const char* buf, size_t len)
         pos += ret;
     }
     return pos;
-    
-}
-static int equal_addr(const struct in6_addr *a, const struct in6_addr *b)
-{
-    return memcmp(a, b, sizeof(struct in6_addr)) == 0;
 }
 
+// IPv4 版本地址比较
+static int equal_addr(const struct in_addr *a, const struct in_addr *b)
+{
+    return a->s_addr == b->s_addr;
+}
+
+// IPv4 版本端口比较
 static int equal_port(in_port_t a, in_port_t b)
 {
     return a == b;
@@ -79,12 +83,12 @@ int main(int argc, char**argv)
                               {"help", 0, NULL, 'H'},\
                               {NULL, 0, NULL, 0}};
     
-    struct ipv6_mreq mreq;
-    struct sockaddr_in6 laddr, serveraddr,raddr;
+    struct ip_mreq mreq;                           // IPv4多播结构体
+    struct sockaddr_in laddr, serveraddr, raddr;   // IPv4地址结构体
     socklen_t serveraddr_len = sizeof(serveraddr), raddr_len = sizeof(raddr);
     int len;
     int chosenid;//选择的频道id
-    int ret;
+    int ret = 0;
 
     /*
     *   初始化
@@ -119,41 +123,47 @@ int main(int argc, char**argv)
    }
     
 
-    sd = socket(AF_INET6, SOCK_DGRAM, 0);
+    // 创建 IPv4 socket
+    sd = socket(AF_INET, SOCK_DGRAM, 0);
     if(sd < 0)
     {
         perror("socket()");
         exit(1);
     }
 
-    if(inet_pton(AF_INET6, client_conf.mgroup, &mreq.ipv6mr_multiaddr) < 0)
+    // 设置多播地址和接口
+    if(inet_pton(AF_INET, client_conf.mgroup, &mreq.imr_multiaddr) < 0)
     {
         perror("inet_pton()");
         exit(1);
     }
-    unsigned int if_index = if_nametoindex("ens33");
-    mreq.ipv6mr_interface = if_index;
-    if(setsockopt(sd, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0)
+    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+
+    // 加入多播组
+    if(setsockopt(sd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0)
     {
-        perror("setsockopt()");
+        perror("setsockopt(IP_ADD_MEMBERSHIP)");
         exit(1);
     }
 
-    if(setsockopt(sd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &val, sizeof(val)) < 0){
-        perror("setsockopt()");
+    // 设置多播回环
+    if(setsockopt(sd, IPPROTO_IP, IP_MULTICAST_LOOP, &val, sizeof(val)) < 0)
+    {
+        perror("setsockopt(IP_MULTICAST_LOOP)");
         exit(1);
     }
 
-    laddr.sin6_family = AF_INET6;
-    laddr.sin6_port = htons(atoi(client_conf.rcvport));
-    laddr.sin6_addr = in6addr_any;
+    // 绑定本地地址和端口
+    laddr.sin_family = AF_INET;
+    laddr.sin_port = htons(atoi(client_conf.rcvport));
+    laddr.sin_addr.s_addr = htonl(INADDR_ANY);
     if(bind(sd, (void *)&laddr, sizeof(laddr)) < 0)
     {
         perror("bind()");
         exit(1);
     }
 
-
+    // 创建管道
     if(pipe(pd) <0)
     {
         perror("pipe()");
@@ -179,58 +189,82 @@ int main(int argc, char**argv)
         perror("execl()");
         exit(1);
     }
-    //父进程：从网络收包，通过pipe传输给子进程
-    else
+// 父进程：从网络收包
+else
+{
+    close(pd[0]);  // 先关闭管道读端，但暂时不用管道
+
+    // 收节目单
+    struct msg_list_st * msg_list;
+    msg_list = malloc(MSG_LIST_MAX);
+    if(msg_list == NULL)
     {
-        //收节目单
-        struct msg_list_st * msg_list;
-        msg_list = malloc(MSG_LIST_MAX);
-        if(msg_list == NULL)
+        perror("malloc()");
+        exit(1);
+    }
+    while(1)
+    {
+        len = recvfrom(sd, msg_list, MSG_LIST_MAX, 0, (void *)&serveraddr, &serveraddr_len);
+        if(len < sizeof(struct msg_list_st))
         {
-            perror("malloc()");
+            fprintf(stderr, "message is too short\n");
+            continue;
+        }
+        if(msg_list->chnid != LISTCHNID)
+        {
+            fprintf(stderr, "channel id is not match\n");
+            continue;
+        }
+        break;
+    }
+
+    // 打印节目单、选择频道
+    struct msg_listentry_st *pos;
+    for(pos = msg_list->entry; (char *)pos < (((char *)msg_list) + len); 
+        pos = (void *)(((char*)pos) + ntohs(pos->len)))
+    {
+        printf("channel %d:%s\n", pos->chnid, pos->disc);
+    }
+
+    printf("Please choose a channel: ");
+    fflush(stdout);
+    ret = 0;
+    while(ret < 1)
+    {
+        ret = scanf("%d", &chosenid);
+        if(ret != 1) {
+            fprintf(stderr, "Invalid input\n");
             exit(1);
         }
-        while(1)
-        {
-            len = recvfrom(sd, msg_list, MSG_LIST_MAX, 0, (void *)&serveraddr,  &serveraddr_len);
-            //数据包传输错误，长度小于结构体最小大小
-            if(len < sizeof(struct msg_list_st))
-            {
-                fprintf(stderr, "message is too short\n");
-                continue;
-            }
-            //不是节目单id
-            if(msg_list->chnid != LISTCHNID)
-            {
-                fprintf(stderr, "channel id is not match\n");
-                continue;
-            }
-            break;
+    }
 
-        }
-        
-        //打印节目单、选择频道
-        struct msg_listentry_st *pos;
-        for(pos = msg_list->entry ; (char *)pos < (((char *)msg_list) + len); pos = (void *)(((char*)pos) + ntohs(pos->len)))
-        {
-            printf("channel %d:%s\n",pos->chnid, pos->disc);
-        }
+    printf("chosenid = %d\n", chosenid);
 
-        // free(msg_list);
+    // 选完频道后再 fork 启动播放器
+    pid = fork();
+    if (pid < 0)
+    {
+        perror("fork()");
+        exit(1);
+    }
 
-        printf("Please choose a channel: ");
-        while( ret < 1)
-        {
-            ret = scanf("%d", &chosenid);
-            if(ret != 1) {
-                fprintf(stderr, "Invalid input\n");
-                exit(1);
-            }
-        }
+    if(pid == 0)
+    {
+        // 子进程：调用解码器播放
+        close(sd);
+        close(pd[1]);
+        dup2(pd[0], 0);
+        if(pd[0] > 0)
+            close(pd[0]);
+        execl("/bin/sh", "sh", "-c", client_conf.player_cmd, NULL);
+        perror("execl()");
+        exit(1);
+    }
+    else
+    {
+        // 父进程：接收频道数据，传给子进程
+        close(pd[0]);
 
-        fprintf(stdout, "chosenid = %d\n", ret);
-        
-        //收频道包，发送给子进程
         struct msg_channel_st *msg_channel;
         msg_channel = malloc(MSG_CHNNEL_MAX);
         if(msg_channel == NULL)
@@ -241,31 +275,32 @@ int main(int argc, char**argv)
         while(1)
         {
             len = recvfrom(sd, msg_channel, MSG_CHNNEL_MAX, 0, (void *)&raddr, &raddr_len);
-            //检查数据合法情况
-            if(!equal_addr(&raddr.sin6_addr,&serveraddr.sin6_addr) || !equal_port(raddr.sin6_port, serveraddr.sin6_port))
+            if(len < 0)
             {
-                fprintf(stderr, "Ignore : address not match");
+                perror("recvfrom()");
                 continue;
             }
-
+            if(!equal_addr(&raddr.sin_addr, &serveraddr.sin_addr) || 
+               !equal_port(raddr.sin_port, serveraddr.sin_port))
+            {
+                fprintf(stderr, "Ignore : address not match\n");
+                continue;
+            }
             if(len < sizeof(struct msg_channel_st))
             {
-                fprintf(stderr, "Ignore : message is too short");
+                fprintf(stderr, "Ignore : message is too short\n");
                 continue;
             }
             if(msg_channel->chnid == chosenid)
             {
-                fprintf(stdout, "accepted msg: %d recieved.\n", chosenid);
-                if(writen(pd[1], msg_channel->data, len - sizeof(chnid_t)) < 0)
+                if(writen(pd[1], (char*)msg_channel->data, len - sizeof(chnid_t)) < 0)
                     exit(1);
-
             }
-
-            
         }
-        
         free(msg_channel);
         close(sd);
+    }
+
     }
     exit(0);
 }

@@ -19,5 +19,5 @@ struct server_conf_st
 };
 extern struct server_conf_st server_conf;
 extern int serversd;
-extern struct sockaddr_in6 sndaddr;
+extern struct sockaddr_in sndaddr;
 #endif

@@ -2,6 +2,9 @@
 #define __THRLIST_H
 
 #include "medialib.h"
+#include "server_conf.h"
+#include "medialib.h"
+#include "proto.h"
 //创建节目单线程
 //拿到节目单list,其中有size个节目
 int thr_list_create(struct mlib_listentry_st*list, int size);

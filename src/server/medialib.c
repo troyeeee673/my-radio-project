@@ -9,9 +9,7 @@
 #include <unistd.h>
 
 #include "medialib.h"
-#include "mytbf.h"
-#include <proto.h>
-#include "server_conf.h"
+#define DEBUG
 
 #define PATHSIZE 1024
 #define LINEBUFSIZE 1024
@@ -19,189 +17,236 @@
 struct channel_context_st
 {
     chnid_t chnid;
-    char* disc;
-    glob_t mpg3glob;
-    int pos;
-    int fd;
-    off_t offset;//偏移
-    mytbf_t *tbf;//流量控制
-     
-
+    char *desc;
+    glob_t mp3glob;
+    int pos;  //cur song
+    int fd;  //file descriptor
+    off_t offset;
+    mytbf_t *tbf;
 };
 
 static struct channel_context_st channel[MAXCHNID + 1];
 
-
-static struct channel_context_st* path2entry(const char *path)
+static struct channel_context_st *path2entry(const char* path)
 {
-    char pathstr[PATHSIZE];
+    // path/desc.text  path/*.mp3
+    syslog(LOG_INFO, "current path :%s\n", path);
+    char pathstr[PATHSIZE] = {'\0'};
     char linebuf[LINEBUFSIZE];
-    FILE* fp;
+    FILE *fp;
     struct channel_context_st *me;
     static chnid_t curr_id = MINCHNID;
-
-    strncpy(pathstr, path, PATHSIZE);
-    strncat(pathstr, "/desc.txt", PATHSIZE - strlen(pathstr) - 1);
-
+    strcat(pathstr, path);
+    strcat(pathstr, "/desc.txt");
     fp = fopen(pathstr, "r");
+    syslog(LOG_INFO, "channel dir:%s\n", pathstr);
     if(fp == NULL)
     {
-        syslog(LOG_INFO, "%s is not a channel dir(Can't find desc file)", path);
+        syslog(LOG_INFO, "%s is not a channel dir(can't find desc.txt)", path);
         return NULL;
     }
     if(fgets(linebuf, LINEBUFSIZE, fp) == NULL)
     {
-        syslog(LOG_INFO, "%s is not a channel dir(Can't find desc file)", path);
+        syslog(LOG_INFO, "%s is not a channel dir(cant get the desc.text)", path);
         fclose(fp);
         return NULL;
     }
     fclose(fp);
-
     me = malloc(sizeof(*me));
     if(me == NULL)
     {
-        syslog(LOG_ERR, "malloc() :%s", strerror(errno));
+        syslog(LOG_ERR, "malloc():%s", strerror(errno));
         return NULL;
     }
 
-    me ->tbf = mytbf_init(MP3_BITRATE/8, MP3_BITRATE/8*10);
+    me->tbf = mytbf_init(MP3_BITRATE/8, MP3_BITRATE/8*5);
     if(me->tbf == NULL)
     {
         syslog(LOG_ERR, "mytbf_init():%s", strerror(errno));
         free(me);
         return NULL;
     }
-
-    me->disc = strdup(linebuf);
+    me->desc = strdup(linebuf);
     strncpy(pathstr, path, PATHSIZE);
-    strncat(pathstr, "/*.mp3", PATHSIZE - strlen(pathstr) - 1);
-    if(glob(pathstr, 0, NULL, &me->mpg3glob) != 0)
+    strncat(pathstr, "/*.mp3", PATHSIZE);
+    if(glob(pathstr, 0, NULL, &me->mp3glob) != 0)
     {
-        curr_id ++;
-        syslog(LOG_INFO, "%s is not a channel dir(Can't find desc file)", path);
+        curr_id++;
+        syslog(LOG_ERR, "%s is not a channel dir(can not find mp3 files", path);
         free(me);
         return NULL;
     }
     me->pos = 0;
     me->offset = 0;
-    me->fd = open(me->mpg3glob.gl_pathv[me->pos], O_RDONLY);
-
-    if(me->fd < 0)
+    me->fd = open(me->mp3glob.gl_pathv[me->pos], O_RDONLY);
+    if(me->fd <0 )
     {
-        syslog(LOG_WARNING, "%s open() failed", me->mpg3glob.gl_pathv[me->pos]);
+        syslog(LOG_WARNING, "%s open failed.",me->mp3glob.gl_pathv[me->pos]);
         free(me);
         return NULL;
     }
     me->chnid = curr_id;
-    curr_id ++;
+    curr_id++;
     return me;
 }
-int mlib_getchnlist(struct mlib_listentry_st **result, int*resnum)
+int mlib_getchnlist(struct mlib_listentry_st **result, int *resnum)
 {
-    int i , num = 0 ;
-    struct mlib_listentry_st *ptr;
-    struct channel_context_st *res;
+    /*variable*/
+    int num = 0;
+    int i = 0;
     char path[PATHSIZE];
     glob_t globres;
-    for(i = 0 ;i < MAXCHNID + 1 ;i++)
+    struct mlib_listentry_st *ptr;
+    struct channel_context_st *res;
+
+    for(int i = 0 ; i < MAXCHNID; i++)
     {
         channel[i].chnid = -1;
     }
     snprintf(path, PATHSIZE, "%s/*", server_conf.media_dir);
-    if(glob(path, 0, NULL, &globres) != 0)
+    #ifdef DEBUG
+        printf("current path:%s\n", path);
+    #endif
+    if(glob(path, 0, NULL, &globres))
     {
         return -1;
     }
+    #ifdef DEBUG
+        printf("globres.gl_pathv[0]:%s\n", globres.gl_pathv[0]);
+        printf("globres.gl_pathv[1]:%s\n", globres.gl_pathv[1]);
+        printf("globres.gl_pathv[2]:%s\n", globres.gl_pathv[2]);
+    #endif
     ptr = malloc(sizeof(struct mlib_listentry_st) * globres.gl_pathc);
     if(ptr == NULL)
     {
-        syslog(LOG_ERR, "malloc() error");
+        syslog(LOG_ERR, "malloc() error.");
         exit(1);
     }
-    for(i = 0 ;i < globres.gl_pathc;i++)
+    for(i = 0; i < globres.gl_pathc; i++)
     {
-        res = path2entry(globres.gl_pathv[i]);//解析路径
+        //globres.gl_pathv[i] -->"/var/media/ch1"
+        res = path2entry(globres.gl_pathv[i]);//path-->record
         if(res != NULL)
         {
-            syslog(LOG_DEBUG, "path2entry() returned : %d %s.", res->chnid, res->disc);
-            memcpy(channel +res->chnid, res, sizeof(*res));
+            syslog(LOG_ERR, "path2entry() return : %d %s.", res->chnid, res->desc);
+            memcpy(channel+res->chnid, res, sizeof(*res));
             ptr[num].chnid = res->chnid;
-            ptr[num].disc = strdup(res->disc);
-            num ++;
+            ptr[num].disc = strdup(res->desc);
+            num++;
         }
-        
     }
     *result = realloc(ptr, sizeof(struct mlib_listentry_st) * num);
-    if(result == NULL)
+    if(*result == NULL)
     {
-        syslog(LOG_ERR, "realloc() failed");
+        syslog(LOG_ERR, "realloc() failed.");
     }
     *resnum = num;
     return 0;
+    
 
 }
-int mlib_freechnlist(struct mlib_listentry_st*ptr)
+
+int mlib_freechnlist(struct mlib_listentry_st *ptr)
 {
     free(ptr);
+    return 0;
 }
+// //当前是失败了或者已经读取完毕才会调用open_next
+// static int open_next(chnid_t chnid)
+// {
+//     //加入循环是为了防止每一首歌都打开失败，尽量都试着打开一次
+//     for(int i = 0 ; i < channel[chnid].mp3glob.gl_pathc;i++)
+//     {
+//         channel[chnid].pos++;
+//         //can open any file in channel[chnid].mp3glob.gl_pathv
+//         //所有的歌曲都没有打开
+//         if(channel[chnid].pos == channel[chnid].mp3glob.gl_pathc)
+//         {
+//             //channel[chnid].pos = 0;//再来一次
+//             return -1;
+//             break;//最后一首歌已经打开完毕，结束
+//         }
+//         close(channel[chnid].fd);
+//         channel[chnid].fd = open(channel[chnid].mp3glob.gl_pathv[channel[chnid].pos], O_RDONLY);//对应频道的歌名
+//         //如果打开还是失败
+//         if(channel[chnid].fd < 0)
+//         {
+//             syslog(LOG_WARNING, "open(%s):%s", channel[chnid].mp3glob.gl_pathv[channel[chnid].pos], strerror(errno));
+//         }
+//         else//success
+//         {
+//             channel[chnid].offset = 0;
+//             return 0;
+//         }
+//     }
+//     syslog(LOG_ERR, "None of mp3 in channel %d id available.", chnid);
 
-
-static int open_next(chnid_t id)
+// }
+static int open_next(chnid_t chnid)
 {
-    for(int i = 0 ;i < channel[id].mpg3glob.gl_pathc;i++)
+    for(int i = 0; i < channel[chnid].mp3glob.gl_pathc; i++)
     {
-        channel[id].pos ++;//移动到下一个内容的位置
-
-        //该频道的所有内容都不能播放
-        if(channel[id].pos == channel[id].mpg3glob.gl_pathc)
+        channel[chnid].pos++;
+        if(channel[chnid].pos == channel[chnid].mp3glob.gl_pathc)
         {
-            channel[id].pos = 0;
-            break;
+            channel[chnid].pos = 0;  // 回到第一首，循环播放
         }
-
-        close(channel[id].fd);
-        channel[id].fd = open(channel[id].mpg3glob.gl_pathv[channel[id].pos], O_RDONLY);
-        if(channel[id].fd < 0)//失败
+        
+        close(channel[chnid].fd);
+        channel[chnid].fd = open(channel[chnid].mp3glob.gl_pathv[channel[chnid].pos], O_RDONLY);
+        
+        if(channel[chnid].fd < 0)
         {
-            syslog(LOG_WARNING, "open(%s) :%s", channel[id].mpg3glob.gl_pathv[channel[id].pos],strerror(errno));
+            syslog(LOG_WARNING, "open(%s):%s", channel[chnid].mp3glob.gl_pathv[channel[chnid].pos], strerror(errno));
         }
         else
         {
-            channel[id].offset = 0;//重新读取；
+            channel[chnid].offset = 0;
             return 0;
         }
     }
-    syslog(LOG_ERR, "None of mp3s in channel %d is avaliable.", id);
-    
+    syslog(LOG_ERR, "None of mp3 in channel %d is available.", chnid);
+    return -1;  // 必须加返回值！
 }
-
-ssize_t mlib_readchn(chnid_t id, void*buf, size_t size)
+//从每个频道中读取内容，将当前播放的歌曲待发送的数据写到buf，实际大小为size
+ssize_t mlib_readchn(chnid_t chnid, void *buf, size_t size)
 {
     int tbfsize;
-    tbfsize = mytbf_fetchtoken(channel[id].tbf, size);
-
     int len;
+    int next_ret = 0;
+    //get token number
+    tbfsize = mytbf_fetchtoken(channel[chnid].tbf, size);
+
     while(1)
     {
-        len = pread(channel[id].fd, buf, tbfsize, channel[id].offset);//从id为id的频道中的offset开始读tbfsize个字节放到buf
-        if(len < 0)//当前读取失败
+        len = pread(channel[chnid].fd, buf, tbfsize,channel[chnid].offset);
+        /*current song open failed*/
+        if(len < 0)
         {
-            syslog(LOG_WARNING, "media file %s pread():%s", channel[id].mpg3glob.gl_pathv[channel[id].pos],strerror(errno));
-          open_next(id) < 0;//开始读取下一部分内容，跳过当前
-          
+            //当前这首歌可能有问题，错误不至于退出，读取下一首歌
+            syslog(LOG_WARNING, "media file %s pread():%s", channel[chnid].mp3glob.gl_pathv[channel[chnid].pos], strerror(errno));
+            open_next(chnid);
         }
-        else if(len ==0)//当前播放完毕
+        else if(len == 0)
         {
-            syslog(LOG_DEBUG,"media file %s plays over", channel[id].mpg3glob.gl_pathv[channel[id].pos]);
-            open_next(id) < 0;
+            syslog(LOG_DEBUG, "media %s file is over", channel[chnid].mp3glob.gl_pathv[channel[chnid].pos]);
+            #ifdef DEBUG
+                printf("current chnid :%d\n", chnid);
+            #endif
+            next_ret = open_next(chnid);
+            break;
         }
-        else //len > 0,
+        else/*len > 0*///真正读取到了数据
         {
-            channel[id].offset += len;//更新偏移
+            channel[chnid].offset += len;
+            syslog(LOG_DEBUG, "epoch : %f", (channel[chnid].offset) / (16*1000*1.024));
             break;
         }
     }
+    //remain some token
     if(tbfsize - len > 0)
-        mytbf_returntokne(channel[id].tbf, tbfsize - len);
-    return len;
+        mytbf_returntoken(channel[chnid].tbf, tbfsize - len);
+    return len;//返回读取到的长度
+
+    
 }

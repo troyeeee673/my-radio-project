@@ -1,6 +1,9 @@
 #ifndef __MEDIALIB_H
 #define __MEDIALIB_H
-#include <site_type.h>
+#include "site_type.h"
+#include "proto.h"
+#include "mytbf.h"
+#include "server_conf.h"
 
 //每一个频道的信息结构体
 //这里由于获取频道信息，数据还在本机上，没有进行网络传输，所以可以使用指针进行数据传递

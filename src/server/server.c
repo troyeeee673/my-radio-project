@@ -15,7 +15,7 @@
 #include <arpa/inet.h> // inet_pton
 #include <net/if.h>
 
-#include <proto.h>
+#include "../include/proto.h"
 #include "medialib.h"
 #include "thr_list.h"
 #include "thr_channel.h"
@@ -37,7 +37,7 @@ struct server_conf_st server_conf = {.rcvport = DEFAULT_RCVPORT,
                                      .ifname = DEFAULT_IF};
 
 int serversd;
-struct sockaddr_in6 sndaddr;
+struct sockaddr_in sndaddr;
 static struct mlib_listentry_st *list;
 void print_help()
 {
@@ -103,36 +103,42 @@ static int daemonize()
 
 static int socket_init()
 {
-    int server_sd;
-    struct ipv6_mreq mreq;
-    server_sd = socket(AF_INET6, SOCK_DGRAM, 0);
-    if (server_sd < 0)
+    struct ip_mreq mreq;  // IPv4多播结构体
+    
+    serversd = socket(AF_INET, SOCK_DGRAM, 0);  // AF_INET6 改成 AF_INET
+    if (serversd < 0)
     {
         syslog(LOG_ERR, "socket() : %s", strerror(errno));
         exit(1);
     }
 
-    inet_pton(AF_INET6, server_conf.mgroup, &mreq.ipv6mr_multiaddr);
-    mreq.ipv6mr_interface = if_nametoindex(server_conf.ifname);
-
     // 设置多播出口接口
-    unsigned int ifindex = if_nametoindex(server_conf.ifname);
-    if (setsockopt(server_sd, IPPROTO_IPV6, IPV6_MULTICAST_IF, &ifindex, sizeof(ifindex)) < 0)
+    struct in_addr ifaddr;
+    ifaddr.s_addr = htonl(INADDR_ANY);  // 或者用实际IP
+    if (setsockopt(serversd, IPPROTO_IP, IP_MULTICAST_IF, &ifaddr, sizeof(ifaddr)) < 0)
     {
-        perror("setsockopt(IPV6_MULTICAST_IF)");
-    }
-
-    // 加入多播组（这个才用 ipv6_mreq）
-    if (setsockopt(server_sd, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0)
-    {
-        syslog(LOG_ERR, "setsockop(IPV6_MULTICAST_IF) : %s", strerror(errno));
+        syslog(LOG_ERR, "setsockopt(IP_MULTICAST_IF) : %s", strerror(errno));
         exit(1);
     }
-    // bind();
-    sndaddr.sin6_family = AF_INET6;
-    sndaddr.sin6_port = htons(atoi(server_conf.rcvport));
-    inet_pton(AF_INET6, server_conf.mgroup, &sndaddr.sin6_addr);
+
+    // 加入多播组
+    inet_pton(AF_INET, server_conf.mgroup, &mreq.imr_multiaddr);
+    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+    
+    if (setsockopt(serversd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0)
+    {
+        syslog(LOG_ERR, "setsockopt(IP_ADD_MEMBERSHIP) : %s", strerror(errno));
+        exit(1);
+    }
+
+    // 设置发送目标地址
+    sndaddr.sin_family = AF_INET;
+    sndaddr.sin_port = htons(atoi(server_conf.rcvport));
+    inet_pton(AF_INET, server_conf.mgroup, &sndaddr.sin_addr);
+    
+    return 0;
 }
+
 int main(int argc, char **argv)
 {
     int c;

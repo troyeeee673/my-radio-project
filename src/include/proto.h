@@ -3,7 +3,7 @@
 
 #include "site_type.h"
 
-#define DEFAULT_MULGROUP    "ff15::1"     //默认多播组号
+#define DEFAULT_MULGROUP    "224.2.2.2"      // IPv4多播地址组
 #define DEFAULT_RCVPORT    "1989"
 
 #define CHNNM               100            //总频道数
